@@ -300,24 +300,31 @@ function App() {
                     className="text-sm font-semibold uppercase tracking-[0.18em] text-neutral-400"
                     data-testid="choose-status-heading"
                   >
-                    Choisir un statut
+                    Choisir comment vous êtes aujourd'hui
                   </h2>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-3">
                     {STATUS_OPTIONS.map((option) => {
                       const isActive = status && status.status_key === option.key;
+                      const isPrimary = option.key === "OK";
+                      const testId =
+                        option.key === "OK"
+                          ? "status-button-je-suis-la"
+                          : "status-button-aujourdhui-different";
                       return (
                         <button
                           key={option.key}
                           type="button"
                           onClick={() => handleStatusChange(option.key)}
                           disabled={loading}
-                          className={`px-4 py-2 rounded-full border text-sm transition-colors duration-150
+                          className={`px-5 py-2.5 rounded-full border text-sm font-medium transition-colors duration-150
                             ${
                               isActive
                                 ? "bg-neutral-100 text-neutral-900 border-neutral-100"
-                                : "bg-neutral-950/60 text-neutral-100 border-neutral-700 hover:bg-neutral-800"
+                                : isPrimary
+                                  ? "bg-neutral-50 text-neutral-900 border-neutral-100 hover:bg-neutral-200"
+                                  : "bg-neutral-950/60 text-neutral-100 border-neutral-700 hover:bg-neutral-800"
                             }`}
-                          data-testid={`status-option-${option.key.toLowerCase()}`}
+                          data-testid={testId}
                         >
                           {option.label}
                         </button>
