@@ -21,6 +21,7 @@ function App() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [legalView, setLegalView] = useState(null);
 
   useEffect(() => {
     const storedToken = window.localStorage.getItem("jsuisla_token");
@@ -364,6 +365,91 @@ function App() {
           )}
         </div>
       </main>
+
+      <footer className="border-t border-neutral-900 bg-neutral-950/90">
+        <div className="max-w-3xl mx-auto px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <p
+            className="text-xs text-neutral-500"
+            data-testid="legal-footer-text"
+          >
+            Je suis là – un outil de présence choisie, sans publicité, sans géolocalisation.
+          </p>
+          <div className="flex gap-4 text-xs text-neutral-400">
+            <button
+              type="button"
+              onClick={() => setLegalView("mentions")}
+              className="underline-offset-4 hover:underline"
+              data-testid="legal-footer-mentions-link"
+            >
+              Mentions légales
+            </button>
+            <button
+              type="button"
+              onClick={() => setLegalView("confidentialite")}
+              className="underline-offset-4 hover:underline"
+              data-testid="legal-footer-privacy-link"
+            >
+              Confidentialité
+            </button>
+          </div>
+        </div>
+      </footer>
+
+      {legalView && (
+        <div
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center px-4 z-40"
+          data-testid="legal-modal"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-neutral-950 border border-neutral-800 p-5 shadow-lg">
+            <h2 className="text-base font-semibold text-neutral-50" data-testid="legal-modal-title">
+              {legalView === "mentions" ? "Mentions légales" : "Politique de confidentialité"}
+            </h2>
+            <div
+              className="mt-3 space-y-2 text-sm text-neutral-300 max-h-64 overflow-y-auto"
+              data-testid="legal-modal-content"
+            >
+              {legalView === "mentions" ? (
+                <>
+                  <p>
+                    Ce service est édité dans le cadre du projet « Je suis là ».
+                  </p>
+                  <p>
+                    Il est proposé à titre expérimental et non commercial. Aucun suivi publicitaire n'est mis en place.
+                  </p>
+                  <p>
+                    Les données sont hébergées chez un prestataire cloud et consistent uniquement en : adresse e-mail et dernier statut choisi.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>
+                    Nous collectons uniquement l'adresse e-mail que vous indiquez et votre dernier statut (« Je suis là » ou « Aujourd'hui, c'est différent »).
+                  </p>
+                  <p>
+                    Aucune géolocalisation, aucun historique détaillé de navigation, aucun profilage marketing.
+                  </p>
+                  <p>
+                    Les données sont utilisées uniquement pour permettre l'affichage de votre statut lorsque vous ouvrez la page.
+                  </p>
+                  <p>
+                    Vous pouvez à tout moment cesser d'utiliser l'outil ; la suppression complète des données pourra être organisée avec l'éditeur du projet.
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setLegalView(null)}
+                className="px-4 py-1.5 rounded-full border border-neutral-600 text-xs text-neutral-100 hover:bg-neutral-800"
+                data-testid="legal-modal-close-button"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
