@@ -82,11 +82,10 @@ class VerifyCodeResponse(BaseModel):
 
 
 # Status models
+# Version minimale : deux statuts explicites seulement
 ALLOWED_STATUSES = {
-    "OK": "Je vais bien",
-    "NORMAL": "Journée normale",
-    "NOT_AVAILABLE": "Pas disponible",
-    "NEED_CONTACT": "Besoin de parler",
+    "OK": "Je suis là",
+    "NEED_CONTACT": "Aujourd'hui, c'est différent",
 }
 
 

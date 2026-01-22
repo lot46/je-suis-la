@@ -8,10 +8,8 @@ import { Badge } from "@/components/ui/badge";
 const API_BASE = process.env.REACT_APP_BACKEND_URL;
 
 const STATUS_OPTIONS = [
-  { key: "OK", label: "Je vais bien" },
-  { key: "NORMAL", label: "Journée normale" },
-  { key: "NOT_AVAILABLE", label: "Pas disponible" },
-  { key: "NEED_CONTACT", label: "Besoin de parler" },
+  { key: "OK", label: "Je suis là" },
+  { key: "NEED_CONTACT", label: "Aujourd'hui, c'est différent" },
 ];
 
 function App() {
