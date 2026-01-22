@@ -129,13 +129,20 @@ class JeSuisLaAPITester:
 
     def test_get_status_without_session(self):
         """Test GET /api/me/status without session token"""
+        # Temporarily clear token to test without session
+        temp_token = self.token
+        self.token = None
+        
         success, response = self.run_test(
             "Get status without session",
             "GET",
             "api/me/status",
             401,
-            headers={}  # No session token
+            headers={'Content-Type': 'application/json'}  # Explicitly no session token
         )
+        
+        # Restore token for subsequent tests
+        self.token = temp_token
         return success
 
     def test_get_status_with_session(self):
