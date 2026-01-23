@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Header
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta
 import os
@@ -13,15 +13,17 @@ MVP_MODE = os.getenv("MVP_MODE", "true").lower() == "true"
 OTP_COOLDOWN_SECONDS = int(os.getenv("OTP_COOLDOWN_SECONDS", "60"))
 
 # =====================
-# APP + ROUTER (IMPORTANT : api est défini AVANT les décorateurs)
+# APP + ROUTER
 # =====================
 app = FastAPI(title="Je suis là API", version="0.1.0")
 api = APIRouter(prefix="/api")
 
 # =====================
-# STOCKAGE MVP (mémoire)
+# STOCKAGE MVP (en mémoire)
 # =====================
-otp_store = {}  # email -> {"code": str, "expires_at": datetime, "last_sent": datetime}
+otp_store = {}      # email -> {"code": str, "expires_at": datetime, "last_sent": datetime}
+token_store = {}    # token -> {"email": str, "created_at": datetime}
+status_store = {}   # email -> {"status_key": str, "status_label": str, "updated_at": str}
 
 # =====================
 # MODELS
@@ -33,6 +35,9 @@ class VerifyCodeInput(BaseModel):
     email: EmailStr
     code: str
 
+class StatusUpdateInput(BaseModel):
+    status_key: str  # "OK" or "NEED_CONTACT"
+
 # =====================
 # UTILS
 # =====================
@@ -41,6 +46,24 @@ def gen_code() -> str:
 
 def gen_token() -> str:
     return str(uuid.uuid4())
+
+def now_utc_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def status_label(key: str) -> str:
+    if key == "OK":
+        return "Je suis là"
+    if key == "NEED_CONTACT":
+        return "Aujourd'hui, c'est différent"
+    raise HTTPException(status_code=400, detail="Statut invalide")
+
+def get_email_from_token(x_session_token: str | None) -> str:
+    if not x_session_token:
+        raise HTTPException(status_code=401, detail="Token manquant")
+    rec = token_store.get(x_session_token)
+    if not rec:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    return rec["email"]
 
 # =====================
 # ROUTES
@@ -65,11 +88,11 @@ def request_code(payload: RequestCodeInput):
         "last_sent": now,
     }
 
-    # MVP_MODE=true : on renvoie le code (test)
+    # MVP : on renvoie le code pour test
     if MVP_MODE:
         return {"message": "Code généré (mode test)", "code": code}
 
-    # MVP_MODE=false : on ne renvoie pas le code (prod)
+    # Prod : on ne renvoie pas le code (plus tard on branchera email)
     return {"message": "Code généré"}
 
 @api.post("/auth/verify-code")
@@ -91,7 +114,28 @@ def verify_code(payload: VerifyCodeInput):
 
     # one-shot
     del otp_store[email]
-    return {"token": gen_token()}
+
+    token = gen_token()
+    token_store[token] = {"email": email, "created_at": now}
+
+    return {"token": token}
+
+# ✅ STATUS (ce qui manquait)
+@api.get("/status")
+def get_status(x_session_token: str | None = Header(default=None, alias="X-Session-Token")):
+    email = get_email_from_token(x_session_token)
+    return status_store.get(email, {"status_key": None, "status_label": None, "updated_at": None})
+
+@api.post("/status")
+def set_status(payload: StatusUpdateInput, x_session_token: str | None = Header(default=None, alias="X-Session-Token")):
+    email = get_email_from_token(x_session_token)
+    label = status_label(payload.status_key)
+    status_store[email] = {
+        "status_key": payload.status_key,
+        "status_label": label,
+        "updated_at": now_utc_iso()
+    }
+    return status_store[email]
 
 # IMPORTANT
 app.include_router(api)
