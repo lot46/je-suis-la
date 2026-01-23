@@ -1,99 +1,99 @@
 from fastapi import FastAPI, APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta, timezone
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
-import random
+import uuid
+import time
 
-# ======================
-# Configuration MongoDB
-# ======================
+# =====================
+# CONFIG
+# =====================
 
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
-OTP_COOLDOWN_SECONDS = int(os.environ.get("OTP_COOLDOWN_SECONDS", 60))
+MVP_MODE = os.getenv("MVP_MODE", "true").lower() == "true"
+OTP_COOLDOWN = int(os.getenv("OTP_COOLDOWN_SECONDS", "60"))
 
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+# Stockage mémoire MVP (VOLONTAIREMENT)
+OTP_STORE = {}
+TOKEN_STORE = {}
 
-otp_codes = db.otp_codes
-
-# ======================
-# App FastAPI
-# ======================
-
-app = FastAPI(title="Je suis là API")
-api = APIRouter(prefix="/api")
-
-# ======================
-# Models
-# ======================
+# =====================
+# MODELS
+# =====================
 
 class RequestCodeInput(BaseModel):
     email: EmailStr
+
+class RequestCodeResponse(BaseModel):
+    message: str
+    code: str
 
 class VerifyCodeInput(BaseModel):
     email: EmailStr
     code: str
 
-# ======================
-# Routes
-# ======================
+class VerifyCodeResponse(BaseModel):
+    token: str
 
-@api.get("/")
-async def root():
+# =====================
+# APP
+# =====================
+
+app = FastAPI(title="Je suis là API")
+router = APIRouter(prefix="/api")
+
+@router.get("/")
+def root():
     return {"message": "Je suis là API"}
 
-@api.post("/auth/request-code")
-async def request_code(input: RequestCodeInput):
-    now = datetime.now(timezone.utc)
+# =====================
+# AUTH
+# =====================
 
-    last = await otp_codes.find_one(
-        {"email": input.email},
-        sort=[("created_at", -1)]
-    )
+@router.post("/auth/request-code", response_model=RequestCodeResponse)
+def request_code(payload: RequestCodeInput):
+    now = time.time()
 
-    if last and (now - last["created_at"]).total_seconds() < OTP_COOLDOWN_SECONDS:
-        raise HTTPException(status_code=429, detail="Attends avant de redemander un code")
+    if payload.email in OTP_STORE:
+        last_time = OTP_STORE[payload.email]["timestamp"]
+        if now - last_time < OTP_COOLDOWN:
+            raise HTTPException(status_code=429, detail="Attendre avant un nouveau code")
 
-    code = str(random.randint(100000, 999999))
+    code = str(uuid.uuid4().int)[-6:]
 
-    await otp_codes.insert_one({
-        "email": input.email,
+    OTP_STORE[payload.email] = {
         "code": code,
-        "created_at": now,
-        "expires_at": now + timedelta(minutes=10),
-        "used": False
-    })
+        "timestamp": now
+    }
 
     return {
         "message": "Code généré",
-        "code": code  # MVP uniquement
+        "code": code
     }
 
-@api.post("/auth/verify-code")
-async def verify_code(input: VerifyCodeInput):
-    record = await otp_codes.find_one({
-        "email": input.email,
-        "code": input.code,
-        "used": False,
-        "expires_at": {"$gt": datetime.now(timezone.utc)}
-    })
+@router.post("/auth/verify-code", response_model=VerifyCodeResponse)
+def verify_code(payload: VerifyCodeInput):
+    entry = OTP_STORE.get(payload.email)
 
-    if not record:
+    if not entry:
+        raise HTTPException(status_code=400, detail="Code introuvable")
+
+    if payload.code != entry["code"]:
         raise HTTPException(status_code=400, detail="Code incorrect")
 
-    await otp_codes.update_one(
-        {"_id": record["_id"]},
-        {"$set": {"used": True}}
-    )
+    token = str(uuid.uuid4())
 
-    return {
-        "token": "SESSION_OK_MVP"
+    TOKEN_STORE[token] = {
+        "email": payload.email,
+        "created_at": time.time()
     }
 
-# ======================
-# Register router
-# ======================
+    del OTP_STORE[payload.email]
 
-app.include_router(api)
+    return {
+        "token": token
+    }
+
+# =====================
+# ROUTER
+# =====================
+
+app.include_router(router)
