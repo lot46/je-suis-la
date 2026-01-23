@@ -6,6 +6,8 @@ import os
 import random
 import string
 import uuid
+import smtplib
+from email.message import EmailMessage
 
 # =========================
 # ENV
@@ -14,6 +16,13 @@ MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
 MVP_MODE = os.getenv("MVP_MODE", "true").lower() == "true"
 OTP_COOLDOWN_SECONDS = int(os.getenv("OTP_COOLDOWN_SECONDS", "60"))
+
+# SMTP (utilisé seulement si MVP_MODE == false)
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "")
 
 # =========================
 # Mongo
@@ -51,6 +60,33 @@ def gen_code():
 def gen_token():
     return str(uuid.uuid4())
 
+def send_otp_email(to_email: str, code: str):
+    """
+    Envoi du code par email (mode public).
+    Utilise SMTP standard. Ne s'exécute que si MVP_MODE == false.
+    """
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and FROM_EMAIL):
+        raise RuntimeError("SMTP env vars missing (SMTP_HOST/SMTP_USER/SMTP_PASS/FROM_EMAIL)")
+
+    msg = EmailMessage()
+    msg["Subject"] = "Je suis là — votre code de connexion"
+    msg["From"] = FROM_EMAIL
+    msg["To"] = to_email
+
+    # Texte simple, neutre, sans marketing, conforme (pas de promesse)
+    msg.set_content(
+        f"Bonjour,\n\n"
+        f"Voici votre code de connexion Je suis là : {code}\n"
+        f"Ce code expire dans 5 minutes.\n\n"
+        f"Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer ce message.\n\n"
+        f"— Je suis là\n"
+    )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+
 # =========================
 # Routes
 # =========================
@@ -78,12 +114,18 @@ async def request_code(payload: RequestCodeInput):
         "used": False,
     })
 
-    # ✅ BLOc 1 : comportement MVP_MODE
+    # Mode MVP : on renvoie le code (test uniquement)
     if MVP_MODE:
         return {"message": "Code généré (mode test)", "code": code}
 
-    # En mode public : on ne renvoie jamais le code
-    return {"message": "Code généré"}
+    # Mode public : on envoie par email, et on ne renvoie jamais le code
+    try:
+        send_otp_email(email, code)
+    except Exception as e:
+        # Message volontairement neutre (ne pas exposer les secrets)
+        raise HTTPException(status_code=500, detail="Envoi du code impossible (configuration email)")
+
+    return {"message": "Code envoyé"}
 
 @api.post("/auth/verify-code")
 async def verify_code(payload: VerifyCodeInput):
