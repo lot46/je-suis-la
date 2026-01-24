@@ -1,274 +1,275 @@
-# backend/server.py
 import os
 import uuid
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 
-from fastapi import FastAPI, APIRouter, Header, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr
+
+from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # -----------------------------
-# Logging
+# ENV / SETTINGS
 # -----------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("je-suis-la")
+load_dotenv()
 
-UTC = timezone.utc
-
-# -----------------------------
-# Env / Config
-# -----------------------------
 MONGO_URL = os.getenv("MONGO_URL", "").strip()
-DB_NAME = os.getenv("DB_NAME", "").strip()
+DB_NAME = os.getenv("DB_NAME", "je_suis_la").strip()
 
+# MVP_MODE=true => on renvoie le code dans la réponse (test uniquement).
+# MVP_MODE=false => on NE renvoie JAMAIS le code (il faut envoyer par email via un provider).
 MVP_MODE = os.getenv("MVP_MODE", "true").strip().lower() == "true"
-OTP_COOLDOWN_SECONDS = int(os.getenv("OTP_COOLDOWN_SECONDS", "60").strip())
-OTP_TTL_MINUTES = int(os.getenv("OTP_TTL_MINUTES", "5").strip())
-SESSION_TTL_DAYS = int(os.getenv("SESSION_TTL_DAYS", "30").strip())
 
-# (Optionnel) clé interne. Si absente, on continue quand même.
+OTP_COOLDOWN_SECONDS = int(os.getenv("OTP_COOLDOWN_SECONDS", "60").strip() or "60")
+OTP_TTL_MINUTES = int(os.getenv("OTP_TTL_MINUTES", "5").strip() or "5")
+
+# Secret de session (utilisé pour versionner/sécuriser le modèle, même si on stocke le token en DB)
 SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    # On évite de crasher si l'env n'est pas encore posée,
+    # mais en prod tu DOIS la définir côté Render.
+    SECRET_KEY = "dev-secret-not-for-production"
 
-if not MONGO_URL:
-    raise RuntimeError("Missing env var MONGO_URL")
-if not DB_NAME:
-    raise RuntimeError("Missing env var DB_NAME")
-
-# -----------------------------
-# DB
-# -----------------------------
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
-
-col_otp = db["otp_codes"]
-col_sessions = db["sessions"]
-col_status = db["status"]
-
-# -----------------------------
-# Business rules
-# -----------------------------
 ALLOWED_STATUSES: Dict[str, str] = {
     "OK": "Je suis là",
     "NEED_CONTACT": "Aujourd’hui, c’est différent",
 }
 
-def normalize_status_key(raw: str) -> str:
-    k = (raw or "").strip().upper()
-    # tolérance : ok / need_contact / need-contact / needcontact
-    if k == "OK":
-        return "OK"
-    k = k.replace("-", "_")
-    if k == "NEEDCONTACT":
-        k = "NEED_CONTACT"
-    return k
+# -----------------------------
+# DB
+# -----------------------------
+if not MONGO_URL:
+    raise RuntimeError("MONGO_URL is missing. Set it in Render Environment Variables.")
 
-def now_utc() -> datetime:
-    return datetime.now(UTC)
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client[DB_NAME]
 
-def generate_code() -> str:
-    # 6 digits, leading zeros allowed
-    return f"{uuid.uuid4().int % 1000000:06d}"
+otp_codes = db["otp_codes"]      # {email, code, expires_at, last_sent_at, used}
+sessions = db["sessions"]        # {token, email, created_at, expires_at}
+status_coll = db["status"]       # {email, status_key, status_label, updated_at}
 
-def generate_token() -> str:
-    return str(uuid.uuid4())
-
-async def send_otp_email_stub(email: str, code: str) -> None:
-    """
-    MVP: pas d’envoi d’e-mail réel.
-    PROD (plus tard): ici on branchera un provider email.
-    """
-    logger.info("MVP OTP for %s: %s", email, code)
+# Indexes (best-effort)
+# NOTE: motor creates indexes async at runtime; if it fails, app still runs.
+async def ensure_indexes():
+    try:
+        await otp_codes.create_index("email", unique=True)
+        await sessions.create_index("token", unique=True)
+        await status_coll.create_index("email", unique=True)
+    except Exception:
+        pass
 
 # -----------------------------
-# Schemas
+# MODELS
 # -----------------------------
 class RequestCodeInput(BaseModel):
     email: EmailStr
 
 class RequestCodeResponse(BaseModel):
     message: str
-    code: Optional[str] = None  # renvoyé uniquement en MVP
+    # En MVP_MODE uniquement, on renvoie "code"
+    code: Optional[str] = None
 
 class VerifyCodeInput(BaseModel):
     email: EmailStr
-    code: str = Field(min_length=4, max_length=12)
+    code: str
 
 class VerifyCodeResponse(BaseModel):
     token: str
 
-class StatusOutput(BaseModel):
+class StatusGetResponse(BaseModel):
     status_key: Optional[str] = None
     status_label: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[str] = None
 
 class StatusSetInput(BaseModel):
     status_key: str
+    # optionnel : si non fourni, on le déduit via ALLOWED_STATUSES
+    status_label: Optional[str] = None
+
+class StatusSetResponse(BaseModel):
+    status_key: str
+    status_label: str
+    updated_at: str
 
 # -----------------------------
-# FastAPI app
+# HELPERS
 # -----------------------------
-app = FastAPI(
-    title="Je suis là API",
-    version="0.1.0",
-)
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-# CORS: permissif pour MVP (PWA / tests)
+def generate_code() -> str:
+    # 6 digits
+    return f"{uuid.uuid4().int % 1000000:06d}"
+
+def generate_token() -> str:
+    return str(uuid.uuid4())
+
+async def get_email_from_token(x_session_token: Optional[str]) -> str:
+    if not x_session_token:
+        raise HTTPException(status_code=401, detail="Missing X-Session-Token")
+    sess = await sessions.find_one({"token": x_session_token})
+    if not sess:
+        raise HTTPException(status_code=401, detail="Token invalid")
+    if sess.get("expires_at") and utcnow() > sess["expires_at"]:
+        # session expirée
+        await sessions.delete_one({"token": x_session_token})
+        raise HTTPException(status_code=401, detail="Token expired")
+    return sess["email"]
+
+def iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+# -----------------------------
+# APP
+# -----------------------------
+app = FastAPI(title="Je suis là API", version="0.1.0")
+
+# CORS permissif pour MVP (à durcir ensuite)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 api = APIRouter(prefix="/api")
 
-@api.get("/", summary="Root")
+@api.get("/", tags=["default"])
 async def root():
     return {"message": "Je suis là API"}
 
 # -----------------------------
-# Auth: request code
+# AUTH
 # -----------------------------
-@api.post("/auth/request-code", response_model=RequestCodeResponse, summary="Request Code")
+@api.post("/auth/request-code", response_model=RequestCodeResponse, tags=["auth"])
 async def request_code(payload: RequestCodeInput):
     email = payload.email.strip().lower()
-    now = now_utc()
+    now = utcnow()
 
     # cooldown
-    existing = await col_otp.find_one({"email": email, "used": False})
-    if existing and existing.get("last_sent"):
-        last_sent = existing["last_sent"]
-        if isinstance(last_sent, datetime):
-            delta = (now - last_sent).total_seconds()
-            if delta < OTP_COOLDOWN_SECONDS:
-                raise HTTPException(
-                    status_code=429,
-                    detail="Veuillez attendre avant de redemander un code",
-                )
+    existing = await otp_codes.find_one({"email": email})
+    if existing and existing.get("last_sent_at"):
+        last_sent_at = existing["last_sent_at"]
+        if isinstance(last_sent_at, str):
+            # safety: if stored as string, ignore cooldown
+            last_sent_at = None
+        if last_sent_at and (now - last_sent_at).total_seconds() < OTP_COOLDOWN_SECONDS:
+            raise HTTPException(status_code=429, detail="Please wait before requesting a new code")
 
     code = generate_code()
     expires_at = now + timedelta(minutes=OTP_TTL_MINUTES)
 
-    await col_otp.update_one(
+    await otp_codes.update_one(
         {"email": email},
         {"$set": {
             "email": email,
             "code": code,
-            "used": False,
             "expires_at": expires_at,
-            "last_sent": now,
+            "last_sent_at": now,
+            "used": False,
         }},
-        upsert=True,
+        upsert=True
     )
 
-    # MVP: pas d'envoi réel
-    await send_otp_email_stub(email, code)
-
+    # MVP: on renvoie le code (test). Prod: on ne renvoie jamais le code.
     if MVP_MODE:
         return {"message": "Code généré (mode test)", "code": code}
+
+    # PRODUCTION PATH (placeholder)
+    # Ici tu brancheras un provider email (Mailgun/SES/Sendgrid etc.)
+    # et tu renverras une réponse neutre.
     return {"message": "Code envoyé"}
 
-# -----------------------------
-# Auth: verify code -> token
-# -----------------------------
-@api.post("/auth/verify-code", response_model=VerifyCodeResponse, summary="Verify Code")
+@api.post("/auth/verify-code", response_model=VerifyCodeResponse, tags=["auth"])
 async def verify_code(payload: VerifyCodeInput):
     email = payload.email.strip().lower()
     code = payload.code.strip()
-    now = now_utc()
+    now = utcnow()
 
-    record = await col_otp.find_one({"email": email, "used": False})
-    if not record:
+    record = await otp_codes.find_one({"email": email})
+    if not record or record.get("used"):
         raise HTTPException(status_code=400, detail="Code introuvable")
 
-    expires_at = record.get("expires_at")
-    if not isinstance(expires_at, datetime) or now > expires_at:
-        await col_otp.update_one({"email": email}, {"$set": {"used": True}})
+    if now > record["expires_at"]:
+        await otp_codes.delete_one({"email": email})
         raise HTTPException(status_code=400, detail="Code expiré")
 
-    if code != record.get("code"):
+    if code != record["code"]:
         raise HTTPException(status_code=400, detail="Code incorrect")
 
-    # one-shot: marque comme utilisé
-    await col_otp.update_one({"email": email}, {"$set": {"used": True}})
+    # code one-shot: mark used
+    await otp_codes.update_one({"email": email}, {"$set": {"used": True}})
 
     token = generate_token()
-    session_expires = now + timedelta(days=SESSION_TTL_DAYS)
+    # Session TTL: 30 jours (MVP)
+    expires_at = now + timedelta(days=30)
 
-    await col_sessions.insert_one({
-        "token": token,
-        "email": email,
-        "created_at": now,
-        "expires_at": session_expires,
-    })
+    await sessions.update_one(
+        {"token": token},
+        {"$set": {
+            "token": token,
+            "email": email,
+            "created_at": now,
+            "expires_at": expires_at,
+        }},
+        upsert=True
+    )
 
     return {"token": token}
 
 # -----------------------------
-# Dependency: session token
+# STATUS
 # -----------------------------
-async def require_session(x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token")) -> str:
-    if not x_session_token:
-        raise HTTPException(status_code=401, detail="Session manquante")
-
-    now = now_utc()
-    sess = await col_sessions.find_one({"token": x_session_token})
-    if not sess:
-        raise HTTPException(status_code=401, detail="Token invalide")
-
-    exp = sess.get("expires_at")
-    if isinstance(exp, datetime) and now > exp:
-        raise HTTPException(status_code=401, detail="Session expirée")
-
-    return sess["email"]
-
-# -----------------------------
-# Status: get / set
-# -----------------------------
-@api.get("/status", response_model=StatusOutput, summary="Get Status")
-async def get_status(email: str = Header(default=None, include_in_schema=False), x_email: Optional[str] = None, x_session_email: str = None, user_email: str = None, session_email: str = None, _=None, __=None, ___=None, ____=None, _____=None, ______=None, _______=None, ________=None, _________=None, __________=None, ___________=None, ____________=None):
-    # NOTE: FastAPI header injection weirdness avoided; we use require_session below in a clean way.
-    raise HTTPException(status_code=500, detail="Misconfigured route")
-
-@api.post("/status", response_model=StatusOutput, summary="Set Status")
-async def set_status(_: StatusSetInput):
-    raise HTTPException(status_code=500, detail="Misconfigured route")
-
-# Cleanly re-register routes with dependency (FastAPI limitation: can't "reuse" the previous decorated functions cleanly)
-@api.get("/status", response_model=StatusOutput, include_in_schema=True)
-async def get_status_real(x_session_email: str = None, x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token")):
-    email = await require_session(x_session_token)
-    doc = await col_status.find_one({"email": email})
+@api.get("/status", response_model=StatusGetResponse, tags=["status"])
+async def get_status(x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token")):
+    email = await get_email_from_token(x_session_token)
+    doc = await status_coll.find_one({"email": email})
     if not doc:
         return {"status_key": None, "status_label": None, "updated_at": None}
+    updated_at = doc.get("updated_at")
+    if isinstance(updated_at, datetime):
+        updated_at = iso(updated_at)
     return {
         "status_key": doc.get("status_key"),
         "status_label": doc.get("status_label"),
-        "updated_at": doc.get("updated_at"),
+        "updated_at": updated_at,
     }
 
-@api.post("/status", response_model=StatusOutput, include_in_schema=True)
-async def set_status_real(payload: StatusSetInput, x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token")):
-    email = await require_session(x_session_token)
+@api.post("/status", response_model=StatusSetResponse, tags=["status"])
+async def set_status(
+    payload: StatusSetInput,
+    x_session_token: Optional[str] = Header(default=None, alias="X-Session-Token"),
+):
+    email = await get_email_from_token(x_session_token)
 
-    key = normalize_status_key(payload.status_key)
-    if key not in ALLOWED_STATUSES:
+    status_key = payload.status_key.strip().upper()
+    if status_key not in ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="Statut invalide")
 
-    label = ALLOWED_STATUSES[key]
-    now = now_utc()
+    status_label = (payload.status_label or "").strip()
+    if not status_label:
+        status_label = ALLOWED_STATUSES[status_key]
 
-    await col_status.update_one(
+    now = utcnow()
+
+    await status_coll.update_one(
         {"email": email},
-        {"$set": {"email": email, "status_key": key, "status_label": label, "updated_at": now}},
-        upsert=True,
+        {"$set": {
+            "email": email,
+            "status_key": status_key,
+            "status_label": status_label,
+            "updated_at": now,
+        }},
+        upsert=True
     )
 
-    return {"status_key": key, "status_label": label, "updated_at": now}
+    return {"status_key": status_key, "status_label": status_label, "updated_at": iso(now)}
 
-# Register router
 app.include_router(api)
+
+@app.on_event("startup")
+async def _startup():
+    await ensure_indexes()
